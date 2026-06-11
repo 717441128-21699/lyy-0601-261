@@ -336,10 +336,17 @@ class ExceptionWindow(QWidget):
         items = self.approval_table.selectedItems()
         if not items:
             self.approval_detail_table.setRowCount(0)
+            self.btn_approve_batch.setEnabled(False)
+            self.btn_reject_batch.setEnabled(False)
             return
         
         row = items[0].row()
         batch_no = self.approval_table.item(row, 0).text()
+        status_item = self.approval_table.item(row, 5)
+        is_pending = status_item and status_item.text() == '待审批'
+        
+        self.btn_approve_batch.setEnabled(is_pending)
+        self.btn_reject_batch.setEnabled(is_pending)
         
         items_list = ApprovalService.get_by_batch(batch_no)
         self.approval_detail_table.setRowCount(len(items_list))
@@ -371,6 +378,10 @@ class ExceptionWindow(QWidget):
         
         row = items[0].row()
         batch_no = self.approval_table.item(row, 0).text()
+        status_item = self.approval_table.item(row, 5)
+        if status_item and status_item.text() != '待审批':
+            QMessageBox.information(self, '提示', f'该批次当前状态为"{status_item.text()}"，无需重复操作。')
+            return
         
         opinion, ok = QInputDialog.getText(self, '审批通过', '请输入审批意见（可选）:')
         if not ok:
@@ -382,8 +393,11 @@ class ExceptionWindow(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             count = ApprovalService.approve_batch(batch_no, approver='admin', opinion=opinion)
-            self.refresh()
-            QMessageBox.information(self, '成功', f'已通过审批，共 {count} 张票据。')
+            if count > 0:
+                self.refresh()
+                QMessageBox.information(self, '成功', f'已通过审批，共 {count} 张票据。')
+            else:
+                QMessageBox.information(self, '提示', '该批次没有待审批的票据，无需操作。')
 
     def _reject_batch(self):
         items = self.approval_table.selectedItems()
@@ -393,6 +407,10 @@ class ExceptionWindow(QWidget):
         
         row = items[0].row()
         batch_no = self.approval_table.item(row, 0).text()
+        status_item = self.approval_table.item(row, 5)
+        if status_item and status_item.text() != '待审批':
+            QMessageBox.information(self, '提示', f'该批次当前状态为"{status_item.text()}"，无需重复操作。')
+            return
         
         opinion, ok = QInputDialog.getText(self, '审批驳回', '请输入驳回意见:')
         if not ok:
@@ -404,8 +422,11 @@ class ExceptionWindow(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             count = ApprovalService.reject_batch(batch_no, approver='admin', opinion=opinion)
-            self.refresh()
-            QMessageBox.information(self, '成功', f'已驳回审批，共 {count} 张票据。')
+            if count > 0:
+                self.refresh()
+                QMessageBox.information(self, '成功', f'已驳回审批，共 {count} 张票据。')
+            else:
+                QMessageBox.information(self, '提示', '该批次没有待审批的票据，无需操作。')
 
     def _detect_duplicates(self):
         duplicates = InvoiceService.detect_duplicates()

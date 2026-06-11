@@ -644,10 +644,10 @@ class ApprovalService:
         return new_id
 
     @staticmethod
-    def batch_submit(invoice_ids: List[int], applicant: str = 'admin') -> Tuple[str, int, float]:
+    def batch_submit(invoice_ids: List[int], applicant: str = 'admin') -> Tuple[str, int, float, List[Tuple[int, str]]]:
         db = get_db()
         if not invoice_ids:
-            return '', 0, 0.0
+            return '', 0, 0.0, []
         
         batch_no = ApprovalService._gen_batch_no()
         now = datetime.now()
@@ -655,14 +655,23 @@ class ApprovalService:
         
         total_amount = 0.0
         count = 0
+        skipped = []
         
         db.begin_transaction()
         try:
             for inv_id in invoice_ids:
                 inv = InvoiceService.get_by_id(inv_id)
                 if not inv:
+                    skipped.append((inv_id, '票据不存在'))
                     continue
-                if inv.status not in ('pending', 'reviewing'):
+                if inv.status == 'approved':
+                    skipped.append((inv_id, '已审批通过'))
+                    continue
+                if inv.status == 'rejected':
+                    skipped.append((inv_id, '已审批驳回'))
+                    continue
+                if inv.status == 'reviewing':
+                    skipped.append((inv_id, '已在审批中'))
                     continue
                 amount = inv.reimbursable_amount if inv.reimbursable_amount > 0 else inv.total_amount
                 db.insert_raw('approval_lists', {
@@ -678,16 +687,16 @@ class ApprovalService:
                 count += 1
             if count == 0:
                 db.rollback()
-                return '', 0, 0.0
+                return '', 0, 0.0, skipped
             db.commit()
         except Exception:
             db.rollback()
             raise
         
-        InvoiceService._safe_log(db, 'batch_submit', 'approval', 0, 
-                                  f'批次[{batch_no}] 提交审批: {count}张票据, 合计{total_amount:.2f}元')
+        db.log_operation('batch_submit', 'approval', 0,
+            f'批次[{batch_no}] 提交审批: {count}张票据, 合计{total_amount:.2f}元')
         
-        return batch_no, count, total_amount
+        return batch_no, count, total_amount, skipped
 
     @staticmethod
     def approve(approval_id: int, approver: str = '', opinion: str = '') -> bool:
@@ -728,13 +737,17 @@ class ApprovalService:
         db = get_db()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        items = db.query('SELECT id, invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        items = db.query('SELECT id, invoice_id, status FROM approval_lists WHERE batch_no = ?', (batch_no,))
         if not items:
+            return 0
+        
+        pending = [item for item in items if item['status'] == 'pending']
+        if not pending:
             return 0
         
         db.begin_transaction()
         try:
-            for item in items:
+            for item in pending:
                 db.execute('UPDATE approval_lists SET status = ?, approver = ?, approval_date = ?, approval_opinion = ? WHERE id = ?',
                           ('approved', approver, now, opinion, item['id']))
                 if item['invoice_id']:
@@ -744,9 +757,9 @@ class ApprovalService:
             db.rollback()
             raise
         
-        count = len(items)
-        InvoiceService._safe_log(db, 'approve_batch', 'approval', 0, 
-                                  f'批次[{batch_no}] 审批通过: {count}张票据')
+        count = len(pending)
+        db.log_operation('approve_batch', 'approval', 0,
+            f'批次[{batch_no}] 审批通过: {count}张票据')
         return count
 
     @staticmethod
@@ -754,13 +767,17 @@ class ApprovalService:
         db = get_db()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        items = db.query('SELECT id, invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        items = db.query('SELECT id, invoice_id, status FROM approval_lists WHERE batch_no = ?', (batch_no,))
         if not items:
+            return 0
+        
+        pending = [item for item in items if item['status'] == 'pending']
+        if not pending:
             return 0
         
         db.begin_transaction()
         try:
-            for item in items:
+            for item in pending:
                 db.execute('UPDATE approval_lists SET status = ?, approver = ?, approval_date = ?, approval_opinion = ? WHERE id = ?',
                           ('rejected', approver, now, opinion, item['id']))
                 if item['invoice_id']:
@@ -770,9 +787,9 @@ class ApprovalService:
             db.rollback()
             raise
         
-        count = len(items)
-        InvoiceService._safe_log(db, 'reject_batch', 'approval', 0, 
-                                  f'批次[{batch_no}] 审批驳回: {count}张票据')
+        count = len(pending)
+        db.log_operation('reject_batch', 'approval', 0,
+            f'批次[{batch_no}] 审批驳回: {count}张票据')
         return count
 
 
@@ -1127,8 +1144,10 @@ class FileImportService:
                 if has_invoice_cols:
                     inv_skipped = 0
                     for idx, (_, row) in enumerate(df.iterrows()):
+                        excel_row = idx + 2
                         inv = Invoice()
                         has_data = False
+                        skip_reason = ''
                         for col in df.columns:
                             val = '' if pd.isna(row[col]) else str(row[col]).strip()
                             col_lower = col.lower()
@@ -1155,7 +1174,8 @@ class FileImportService:
                                     if v > 0:
                                         has_data = True
                                 except ValueError:
-                                    pass
+                                    if val:
+                                        skip_reason = f'金额格式错误({val})'
                             elif col in ['税额'] or 'tax' in col_lower:
                                 try:
                                     inv.tax_amount = float(val)
@@ -1168,7 +1188,8 @@ class FileImportService:
                                     if v > 0:
                                         has_data = True
                                 except ValueError:
-                                    pass
+                                    if val:
+                                        skip_reason = f'金额格式错误({val})'
                             elif col in ['费用类别', '类别'] or 'category' in col_lower:
                                 inv.category = val
                             elif col in ['部门'] or 'department' in col_lower:
@@ -1184,14 +1205,22 @@ class FileImportService:
                             invoices.append(inv)
                         else:
                             inv_skipped += 1
-                    if inv_skipped > 0:
-                        skipped.append(f'Sheet[{sheet_name}]-票据: 跳过 {inv_skipped} 条空行/无有效数据的行')
+                            if skip_reason:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: {skip_reason}')
+                            elif not has_data:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: 全部字段为空')
+                            elif inv.total_amount <= 0:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: 价税合计为0或为空')
+                    if inv_skipped > 0 and not any(s.startswith(f'Sheet[{sheet_name}]') for s in skipped):
+                        skipped.append(f'Sheet[{sheet_name}]-票据: 跳过 {inv_skipped} 条')
 
                 if has_payment_cols:
                     pay_skipped = 0
                     for idx, (_, row) in enumerate(df.iterrows()):
+                        excel_row = idx + 2
                         pay = Payment()
                         has_data = False
+                        skip_reason = ''
                         for col in df.columns:
                             val = '' if pd.isna(row[col]) else str(row[col]).strip()
                             col_lower = col.lower()
@@ -1210,7 +1239,8 @@ class FileImportService:
                                     if v > 0:
                                         has_data = True
                                 except ValueError:
-                                    pass
+                                    if val:
+                                        skip_reason = f'金额格式错误({val})'
                             elif col in ['收款方', '收款人', '供应商'] or 'payee' in col_lower:
                                 pay.payee = val
                                 if val:
@@ -1228,8 +1258,14 @@ class FileImportService:
                             payments.append(pay)
                         else:
                             pay_skipped += 1
-                    if pay_skipped > 0:
-                        skipped.append(f'Sheet[{sheet_name}]-流水: 跳过 {pay_skipped} 条空行/无有效数据的行')
+                            if skip_reason:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: {skip_reason}')
+                            elif not has_data:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: 流水全部字段为空')
+                            elif pay.pay_amount <= 0:
+                                skipped.append(f'Sheet[{sheet_name}] 第{excel_row}行: 付款金额为0或为空')
+                    if pay_skipped > 0 and not any(s.startswith(f'Sheet[{sheet_name}]') and '流水' in s for s in skipped):
+                        skipped.append(f'Sheet[{sheet_name}]-流水: 跳过 {pay_skipped} 条')
 
                 if not has_invoice_cols and not has_payment_cols:
                     skipped.append(f'Sheet[{sheet_name}]: 未识别到票据或流水列，已跳过')
@@ -1286,10 +1322,7 @@ class FileImportService:
             result.error_msg = str(e)
             return result
 
-        try:
-            detail = f'批次[{batch_no}] {source}: 成功导入票据{result.invoice_count}张, 流水{result.payment_count}条'
-            InvoiceService._safe_log(db, 'batch_import', 'import', 0, detail)
-        except Exception:
-            pass
+        db.log_operation('batch_import', 'import', 0,
+            f'批次[{batch_no}] {source}: 成功导入票据{result.invoice_count}张, 流水{result.payment_count}条')
 
         return result

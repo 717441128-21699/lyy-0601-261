@@ -377,12 +377,29 @@ class CategoryWindow(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                batch_no, count, total = ApprovalService.batch_submit(ids, applicant='admin')
+                batch_no, count, total, skipped = ApprovalService.batch_submit(ids, applicant='admin')
+                self.refresh()
+                
                 if count > 0:
-                    self.refresh()
-                    QMessageBox.information(self, '成功',
-                        f'提交成功！\n\n审批单批次号: {batch_no}\n包含票据: {count} 张\n申请总金额: ¥{total:.2f}\n\n可在"异常清单 → 待审批清单"中查看。')
+                    msg = f'提交成功！\n\n审批单批次号: {batch_no}\n包含票据: {count} 张\n申请总金额: ¥{total:.2f}'
+                    if skipped:
+                        msg += f'\n\n跳过 {len(skipped)} 张票据：'
+                        for inv_id, reason in skipped[:10]:
+                            inv = InvoiceService.get_by_id(inv_id)
+                            name = inv.file_name if inv else f'ID:{inv_id}'
+                            msg += f'\n  • {name} — {reason}'
+                        if len(skipped) > 10:
+                            msg += f'\n  ... 共 {len(skipped)} 张'
+                    msg += '\n\n可在"异常清单 → 待审批清单"中查看。'
+                    QMessageBox.information(self, '提交结果', msg)
                 else:
-                    QMessageBox.warning(self, '提示', '没有可提交的票据（可能已在审批中）。')
+                    msg = '没有可提交的票据。'
+                    if skipped:
+                        msg += f'\n\n全部 {len(skipped)} 张被跳过：'
+                        for inv_id, reason in skipped[:10]:
+                            inv = InvoiceService.get_by_id(inv_id)
+                            name = inv.file_name if inv else f'ID:{inv_id}'
+                            msg += f'\n  • {name} — {reason}'
+                    QMessageBox.warning(self, '提示', msg)
             except Exception as e:
                 QMessageBox.critical(self, '失败', f'提交审批失败：{str(e)}')
