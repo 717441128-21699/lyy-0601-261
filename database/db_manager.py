@@ -194,8 +194,26 @@ class DatabaseManager:
         cursor.execute(sql, params)
         return cursor
 
+    def begin_transaction(self):
+        self._conn.execute('BEGIN')
+
     def commit(self):
         self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def insert_raw(self, table: str, data: Dict[str, Any]) -> int:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if 'created_at' not in data:
+            data['created_at'] = now
+        if 'updated_at' not in data:
+            data['updated_at'] = now
+        columns = ', '.join(data.keys())
+        placeholders = ', '.join(['?'] * len(data))
+        sql = f'INSERT INTO {table} ({columns}) VALUES ({placeholders})'
+        cursor = self.execute(sql, tuple(data.values()))
+        return cursor.lastrowid
 
     def insert(self, table: str, data: Dict[str, Any]) -> int:
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

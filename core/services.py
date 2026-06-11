@@ -16,6 +16,13 @@ from core.models import (
 
 class InvoiceService:
     @staticmethod
+    def _safe_log(db, op_type, target_type, target_id, detail):
+        try:
+            db.log_operation(op_type, target_type, target_id, detail)
+        except Exception:
+            pass
+
+    @staticmethod
     def get_all(keyword: str = '', status: str = '', 
                 start_date: str = '', end_date: str = '') -> List[Invoice]:
         db = get_db()
@@ -100,8 +107,34 @@ class InvoiceService:
             'ocr_result': invoice.ocr_result
         }
         new_id = db.insert('invoices', data)
-        db.log_operation('create', 'invoice', new_id, f'新增票据: {invoice.file_name}')
+        InvoiceService._safe_log(db, 'create', 'invoice', new_id, f'新增票据: {invoice.file_name}')
         return new_id
+
+    @staticmethod
+    def create_in_transaction(db, invoice: Invoice) -> int:
+        data = {
+            'file_path': invoice.file_path,
+            'file_name': invoice.file_name,
+            'invoice_no': invoice.invoice_no,
+            'invoice_code': invoice.invoice_code,
+            'amount': invoice.amount,
+            'tax_amount': invoice.tax_amount,
+            'total_amount': invoice.total_amount,
+            'invoice_date': invoice.invoice_date,
+            'supplier': invoice.supplier,
+            'buyer': invoice.buyer,
+            'category': invoice.category,
+            'department': invoice.department,
+            'project': invoice.project,
+            'reimbursable_amount': invoice.reimbursable_amount,
+            'status': invoice.status,
+            'is_duplicate': int(invoice.is_duplicate),
+            'has_attachment': int(invoice.has_attachment),
+            'remark': invoice.remark,
+            'opinion': invoice.opinion,
+            'ocr_result': invoice.ocr_result
+        }
+        return db.insert_raw('invoices', data)
 
     @staticmethod
     def update(invoice_id: int, data: Dict) -> bool:
@@ -112,7 +145,7 @@ class InvoiceService:
             data['has_attachment'] = int(data['has_attachment'])
         rows = db.update('invoices', data, 'id = ?', (invoice_id,))
         if rows > 0:
-            db.log_operation('update', 'invoice', invoice_id, f'更新票据信息')
+            InvoiceService._safe_log(db, 'update', 'invoice', invoice_id, f'更新票据信息')
         return rows > 0
 
     @staticmethod
@@ -121,34 +154,64 @@ class InvoiceService:
         invoice = InvoiceService.get_by_id(invoice_id)
         rows = db.delete('invoices', 'id = ?', (invoice_id,))
         if rows > 0 and invoice:
-            db.log_operation('delete', 'invoice', invoice_id, f'删除票据: {invoice.file_name}')
+            InvoiceService._safe_log(db, 'delete', 'invoice', invoice_id, f'删除票据: {invoice.file_name}')
         return rows > 0
 
     @staticmethod
     def batch_create(invoices: List[Invoice]) -> List[int]:
-        return [InvoiceService.create(inv) for inv in invoices]
+        db = get_db()
+        db.begin_transaction()
+        try:
+            ids = []
+            for inv in invoices:
+                new_id = InvoiceService.create_in_transaction(db, inv)
+                ids.append(new_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        for i, inv in enumerate(invoices):
+            InvoiceService._safe_log(db, 'create', 'invoice', ids[i], f'批量新增票据: {inv.file_name}')
+        return ids
 
     @staticmethod
     def detect_duplicates() -> List[Tuple[Invoice, List[Invoice]]]:
         db = get_db()
+        db.execute('UPDATE invoices SET is_duplicate = 0')
+        db.commit()
+
         rows = db.query('SELECT * FROM invoices ORDER BY invoice_date')
         invoices = [InvoiceService._row_to_invoice(r) for r in rows]
         
+        dup_ids = set()
         duplicates = []
         for i, inv in enumerate(invoices):
+            if inv.id in dup_ids:
+                continue
             dup_list = []
             for j, other in enumerate(invoices):
                 if i >= j:
                     continue
+                if other.id in dup_ids:
+                    continue
                 is_dup = False
-                if inv.invoice_no and inv.invoice_no == other.invoice_no and inv.invoice_code and inv.invoice_code == other.invoice_code:
+                if inv.invoice_no and other.invoice_no and inv.invoice_no == other.invoice_no and inv.invoice_code and inv.invoice_code == other.invoice_code:
                     is_dup = True
-                elif abs(inv.total_amount - other.total_amount) < 0.01 and inv.invoice_date == other.invoice_date and inv.supplier == other.supplier and inv.total_amount > 0:
+                elif inv.total_amount > 0 and abs(inv.total_amount - other.total_amount) < 0.01 and inv.invoice_date == other.invoice_date and inv.supplier and inv.supplier == other.supplier:
                     is_dup = True
                 if is_dup:
                     dup_list.append(other)
+                    dup_ids.add(other.id)
             if dup_list:
+                dup_ids.add(inv.id)
                 duplicates.append((inv, dup_list))
+
+        for inv, dup_list in duplicates:
+            db.update('invoices', {'is_duplicate': 1}, 'id = ?', (inv.id,))
+            for d in dup_list:
+                db.update('invoices', {'is_duplicate': 1}, 'id = ?', (d.id,))
+        db.commit()
+        
         return duplicates
 
     @staticmethod
@@ -226,15 +289,48 @@ class PaymentService:
             'matched_status': payment.matched_status
         }
         new_id = db.insert('payments', data)
-        db.log_operation('create', 'payment', new_id, f'新增付款记录: {payment.payment_no}')
+        InvoiceService._safe_log(db, 'create', 'payment', new_id, f'新增付款记录: {payment.payment_no}')
         return new_id
+
+    @staticmethod
+    def create_in_transaction(db, payment: Payment) -> int:
+        data = {
+            'payment_no': payment.payment_no,
+            'pay_date': payment.pay_date,
+            'pay_amount': payment.pay_amount,
+            'payee': payment.payee,
+            'bank_account': payment.bank_account,
+            'bank_name': payment.bank_name,
+            'purpose': payment.purpose,
+            'remark': payment.remark,
+            'invoice_id': payment.invoice_id,
+            'matched_status': payment.matched_status
+        }
+        return db.insert_raw('payments', data)
+
+    @staticmethod
+    def batch_create(payments: List[Payment]) -> List[int]:
+        db = get_db()
+        db.begin_transaction()
+        try:
+            ids = []
+            for pay in payments:
+                new_id = PaymentService.create_in_transaction(db, pay)
+                ids.append(new_id)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        for i, pay in enumerate(payments):
+            InvoiceService._safe_log(db, 'create', 'payment', ids[i], f'批量新增付款记录: {pay.payment_no}')
+        return ids
 
     @staticmethod
     def update(payment_id: int, data: Dict) -> bool:
         db = get_db()
         rows = db.update('payments', data, 'id = ?', (payment_id,))
         if rows > 0:
-            db.log_operation('update', 'payment', payment_id, f'更新付款记录')
+            InvoiceService._safe_log(db, 'update', 'payment', payment_id, f'更新付款记录')
         return rows > 0
 
     @staticmethod
@@ -243,7 +339,7 @@ class PaymentService:
         payment = PaymentService.get_by_id(payment_id)
         rows = db.delete('payments', 'id = ?', (payment_id,))
         if rows > 0 and payment:
-            db.log_operation('delete', 'payment', payment_id, f'删除付款记录: {payment.payment_no}')
+            InvoiceService._safe_log(db, 'delete', 'payment', payment_id, f'删除付款记录: {payment.payment_no}')
         return rows > 0
 
     @staticmethod
@@ -254,7 +350,7 @@ class PaymentService:
             'matched_status': 'matched'
         }, 'id = ?', (payment_id,))
         if rows > 0:
-            db.log_operation('match', 'payment', payment_id, f'匹配票据ID: {invoice_id}')
+            InvoiceService._safe_log(db, 'match', 'payment', payment_id, f'匹配票据ID: {invoice_id}')
         return rows > 0
 
     @staticmethod
@@ -666,7 +762,7 @@ class OperationLogService:
 
 class OCRService:
     @staticmethod
-    def recognize(image_path: str) -> Dict:
+    def _parse_filename(file_name: str) -> Dict:
         result = {
             'invoice_no': '',
             'invoice_code': '',
@@ -678,12 +774,85 @@ class OCRService:
             'buyer': '',
             'raw_text': ''
         }
+
+        name_no_ext = os.path.splitext(file_name)[0]
+        result['raw_text'] = f'[文件名解析] {file_name}'
+
+        date_match = re.search(r'(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})日?', name_no_ext)
+        if date_match:
+            y, m, d = date_match.group(1), int(date_match.group(2)), int(date_match.group(3))
+            result['invoice_date'] = f'{y}-{m:02d}-{d:02d}'
+        else:
+            date_match2 = re.search(r'(\d{4})(\d{2})(\d{2})', name_no_ext)
+            if date_match2:
+                y, m, d = date_match2.group(1), int(date_match2.group(2)), int(date_match2.group(3))
+                if 1 <= m <= 12 and 1 <= d <= 31:
+                    result['invoice_date'] = f'{y}-{m:02d}-{d:02d}'
+
+        inv_no_match = re.search(r'(?:发票号|票号|No\.?|编号)[：:\s]*(\d{6,20})', name_no_ext, re.IGNORECASE)
+        if inv_no_match:
+            result['invoice_no'] = inv_no_match.group(1)
+
+        cleaned = name_no_ext
+        for pattern in [r'(\d{4})[年\-./](\d{1,2})[月\-./](\d{1,2})日?', r'(\d{4})(\d{2})(\d{2})',
+                        r'(?:发票号|票号|No\.?|编号)[：:\s]*\d{6,20}',
+                        r'(?:供应商|销方|收款方|收款人)[：:\s]*[^\s,，\-_]+']:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+        amount_match = re.search(r'[¥￥]?\s*(\d+(?:\.\d{1,2})?)\s*元?', cleaned)
+        if amount_match:
+            val = float(amount_match.group(1))
+            if val < 100000:
+                result['total_amount'] = val
+                result['amount'] = round(val / 1.06, 2) if val > 0 else 0.0
+                result['tax_amount'] = round(val - result['amount'], 2)
+        else:
+            amount_match2 = re.search(r'[¥￥]\s*(\d+)', cleaned)
+            if amount_match2:
+                val = float(amount_match2.group(1))
+                result['total_amount'] = val
+                result['amount'] = round(val / 1.06, 2) if val > 0 else 0.0
+                result['tax_amount'] = round(val - result['amount'], 2)
+
+        supplier_match = re.search(r'(?:供应商|销方|收款方|收款人)[：:\s]*([^\s,，\-_]+)', name_no_ext)
+        if supplier_match:
+            result['supplier'] = supplier_match.group(1).strip()
+
+        skip_words = ('发票号', '票号', '供应商', '销方', '收款方', '元', '年', '月', '日',
+                      '报销', '差旅费', '办公费', '交通费', '招待费', '通讯费', '培训费', '福利费',
+                      '其他费', '发票', '收据', '凭证', '附件', '回单', '账单')
+
+        parts = re.split(r'[_\-\s]+', name_no_ext)
+        if not result['supplier'] and len(parts) >= 2:
+            for part in parts:
+                cn = re.search(r'[\u4e00-\u9fff]{2,}(?:公司|有限|集团|科技|商贸|服务|咨询)', part)
+                if cn:
+                    result['supplier'] = cn.group(0)
+                    break
+        if not result['supplier'] and len(parts) >= 2:
+            for part in parts:
+                cn = re.search(r'[\u4e00-\u9fff]{2,}', part)
+                if cn and cn.group(0) not in skip_words:
+                    result['supplier'] = cn.group(0)
+                    break
+
+        if result['invoice_no'] or result['total_amount'] > 0 or result['invoice_date']:
+            result['raw_text'] += f'\n解析结果: 发票号={result["invoice_no"]}, 金额={result["total_amount"]}, 日期={result["invoice_date"]}, 供应商={result["supplier"]}'
+
+        return result
+
+    @staticmethod
+    def recognize(image_path: str) -> Dict:
+        file_name = os.path.basename(image_path)
+        result = OCRService._parse_filename(file_name)
+
         try:
             if os.path.exists(image_path):
                 img = Image.open(image_path)
-                result['raw_text'] = f'[OCR模拟] 已扫描图片: {os.path.basename(image_path)}\n图片尺寸: {img.size[0]}x{img.size[1]}'
+                result['raw_text'] += f'\n[图片信息] 尺寸: {img.size[0]}x{img.size[1]}, 格式: {img.format or "未知"}'
         except Exception as e:
-            result['raw_text'] = f'OCR处理失败: {str(e)}'
+            result['raw_text'] += f'\n[警告] 图片读取失败: {str(e)}'
+
         return result
 
 
@@ -708,6 +877,8 @@ class FileImportService:
                 invoice_date=ocr_result['invoice_date'],
                 supplier=ocr_result['supplier'],
                 buyer=ocr_result['buyer'],
+                reimbursable_amount=ocr_result['total_amount'],
+                has_attachment=True,
                 ocr_result=ocr_result['raw_text']
             )
             invoices.append(invoice)

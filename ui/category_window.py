@@ -270,12 +270,16 @@ class CategoryWindow(QWidget):
         if ok and name.strip():
             from core.models import Project
             proj = Project(name=name.strip())
-            ProjectService.create(proj)
-            self._load_combos()
-            idx = self.project_combo.findText(name.strip())
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-            QMessageBox.information(self, '成功', f'项目"{name}"已创建。')
+            new_id = ProjectService.create(proj)
+            if new_id:
+                self._load_combos()
+                for i in range(self.project_combo.count()):
+                    if self.project_combo.itemText(i) == name.strip():
+                        self.project_combo.setCurrentIndex(i)
+                        break
+                QMessageBox.information(self, '成功', f'项目"{name.strip()}"已创建并保存。')
+            else:
+                QMessageBox.warning(self, '失败', '项目创建失败，可能名称已存在。')
 
     def _calc_reimbursable(self):
         ids = self._get_selected_ids()

@@ -202,26 +202,30 @@ class ImportWindow(QWidget):
             self.progress_bar.setMaximum(len(self._pending_invoices) + len(self._pending_payments))
             self.progress_bar.setValue(0)
             
-            inv_count = 0
-            for inv in self._pending_invoices:
-                InvoiceService.create(inv)
-                inv_count += 1
-                self.progress_bar.setValue(self.progress_bar.value() + 1)
-            
-            pay_count = 0
-            for pay in self._pending_payments:
-                PaymentService.create(pay)
-                pay_count += 1
-                self.progress_bar.setValue(self.progress_bar.value() + 1)
-            
-            self.progress_bar.setVisible(False)
-            self._pending_invoices.clear()
-            self._pending_payments.clear()
-            self._refresh_invoice_table()
-            self._refresh_payment_table()
-            
-            QMessageBox.information(self, '导入完成',
-                f'成功导入：\n- 票据: {inv_count} 条\n- 付款流水: {pay_count} 条\n请前往"票据识别核对"继续处理。')
+            try:
+                inv_count = 0
+                if self._pending_invoices:
+                    InvoiceService.batch_create(self._pending_invoices)
+                    inv_count = len(self._pending_invoices)
+                    self.progress_bar.setValue(inv_count)
+                
+                pay_count = 0
+                if self._pending_payments:
+                    PaymentService.batch_create(self._pending_payments)
+                    pay_count = len(self._pending_payments)
+                    self.progress_bar.setValue(inv_count + pay_count)
+                
+                self._pending_invoices.clear()
+                self._pending_payments.clear()
+                self._refresh_invoice_table()
+                self._refresh_payment_table()
+                
+                self.progress_bar.setVisible(False)
+                QMessageBox.information(self, '导入完成',
+                    f'成功导入：\n- 票据: {inv_count} 条\n- 付款流水: {pay_count} 条\n请前往"票据识别核对"继续处理。')
+            except Exception as e:
+                self.progress_bar.setVisible(False)
+                QMessageBox.critical(self, '导入失败', f'导入过程中出现错误，数据已回滚，未写入数据库：\n{str(e)}')
 
     def _clear_list(self):
         if self._pending_invoices or self._pending_payments:

@@ -179,9 +179,9 @@ class ExceptionWindow(QWidget):
         
         tab_layout.addLayout(bar)
         
-        self.approval_table = QTableWidget(0, 9)
+        self.approval_table = QTableWidget(0, 10)
         self.approval_table.setHorizontalHeaderLabels([
-            'ID', '票据ID', '申请人', '申请日期', '申请金额', '状态', '审批人', '审批日期', '审批意见'
+            'ID', '票据文件名', '申请人', '申请日期', '票据金额', '申请金额', '状态', '审批人', '审批日期', '审批意见'
         ])
         self.approval_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.approval_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -287,10 +287,19 @@ class ExceptionWindow(QWidget):
         self.approval_table.setRowCount(len(approvals))
         for row, app in enumerate(approvals):
             self.approval_table.setItem(row, 0, QTableWidgetItem(str(app.id)))
-            self.approval_table.setItem(row, 1, QTableWidgetItem(str(app.invoice_id) if app.invoice_id else '-'))
+            
+            inv_file_name = '-'
+            inv_total = 0.0
+            if app.invoice_id:
+                inv = InvoiceService.get_by_id(app.invoice_id)
+                if inv:
+                    inv_file_name = inv.file_name
+                    inv_total = inv.total_amount
+            self.approval_table.setItem(row, 1, QTableWidgetItem(inv_file_name))
             self.approval_table.setItem(row, 2, QTableWidgetItem(app.applicant))
             self.approval_table.setItem(row, 3, QTableWidgetItem(app.apply_date))
-            self.approval_table.setItem(row, 4, QTableWidgetItem(f'{app.amount:.2f}'))
+            self.approval_table.setItem(row, 4, QTableWidgetItem(f'{inv_total:.2f}'))
+            self.approval_table.setItem(row, 5, QTableWidgetItem(f'{app.amount:.2f}'))
             
             status_text = {'pending': '待审批', 'approved': '已通过', 'rejected': '已驳回'}.get(app.status, app.status)
             status_item = QTableWidgetItem(status_text)
@@ -300,23 +309,20 @@ class ExceptionWindow(QWidget):
                 status_item.setBackground(Qt.GlobalColor.green)
             elif app.status == 'rejected':
                 status_item.setBackground(Qt.GlobalColor.red)
-            self.approval_table.setItem(row, 5, status_item)
+            self.approval_table.setItem(row, 6, status_item)
             
-            self.approval_table.setItem(row, 6, QTableWidgetItem(app.approver))
-            self.approval_table.setItem(row, 7, QTableWidgetItem(app.approval_date))
-            self.approval_table.setItem(row, 8, QTableWidgetItem(app.approval_opinion))
+            self.approval_table.setItem(row, 7, QTableWidgetItem(app.approver))
+            self.approval_table.setItem(row, 8, QTableWidgetItem(app.approval_date))
+            self.approval_table.setItem(row, 9, QTableWidgetItem(app.approval_opinion))
 
     def _detect_duplicates(self):
         duplicates = InvoiceService.detect_duplicates()
-        count = 0
-        for inv, dup_list in duplicates:
-            InvoiceService.mark_duplicate(inv.id, True)
-            count += 1
-            for d in dup_list:
-                InvoiceService.mark_duplicate(d.id, True)
-                count += 1
+        count = sum(1 + len(dup_list) for _, dup_list in duplicates)
         self.refresh()
-        QMessageBox.information(self, '检测完成', f'共检测并标记 {count} 张可能重复的票据。\n请人工核实确认。')
+        if count > 0:
+            QMessageBox.information(self, '检测完成', f'共检测到 {count} 张可能重复的票据（已重新按当前数据计算）。\n已不重复的记录已从清单中移除，请人工核实确认。')
+        else:
+            QMessageBox.information(self, '检测完成', '未检测到重复票据。所有记录均无重复。')
 
     def _get_selected_ids(self, table: QTableWidget, id_col: int = 0):
         ids = []
