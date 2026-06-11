@@ -269,17 +269,28 @@ class CategoryWindow(QWidget):
         name, ok = QInputDialog.getText(self, '新建项目', '请输入项目名称:')
         if ok and name.strip():
             from core.models import Project
-            proj = Project(name=name.strip())
+            proj_name = name.strip()
+            existing = ProjectService.get_by_name(proj_name)
+            if existing:
+                self._load_combos()
+                for i in range(self.project_combo.count()):
+                    if self.project_combo.itemText(i) == proj_name:
+                        self.project_combo.setCurrentIndex(i)
+                        break
+                QMessageBox.information(self, '提示', f'项目"{proj_name}"已存在，已直接选中。')
+                return
+            
+            proj = Project(name=proj_name)
             new_id = ProjectService.create(proj)
             if new_id:
                 self._load_combos()
                 for i in range(self.project_combo.count()):
-                    if self.project_combo.itemText(i) == name.strip():
+                    if self.project_combo.itemText(i) == proj_name:
                         self.project_combo.setCurrentIndex(i)
                         break
-                QMessageBox.information(self, '成功', f'项目"{name.strip()}"已创建并保存。')
+                QMessageBox.information(self, '成功', f'项目"{proj_name}"已创建并保存。')
             else:
-                QMessageBox.warning(self, '失败', '项目创建失败，可能名称已存在。')
+                QMessageBox.warning(self, '失败', '项目创建失败。')
 
     def _calc_reimbursable(self):
         ids = self._get_selected_ids()
@@ -354,25 +365,18 @@ class CategoryWindow(QWidget):
             QMessageBox.warning(self, '提示', '请先选择要提交审批的票据。')
             return
         
-        from core.models import ApprovalList
-        from core.services import ApprovalService
-        from datetime import datetime
+        reply = QMessageBox.question(self, '确认提交',
+            f'确定将选中的 {len(ids)} 张票据合并提交审批？\n（将生成一张审批单，可在异常清单-待审批中查看）',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
-        count = 0
-        total_amount = 0
-        for inv_id in ids:
-            inv = InvoiceService.get_by_id(inv_id)
-            if inv:
-                approval = ApprovalList(
-                    invoice_id=inv_id,
-                    applicant='admin',
-                    apply_date=datetime.now().strftime('%Y-%m-%d'),
-                    amount=inv.reimbursable_amount or inv.total_amount
-                )
-                ApprovalService.create(approval)
-                count += 1
-                total_amount += inv.reimbursable_amount or inv.total_amount
-        
-        self.refresh()
-        QMessageBox.information(self, '提交成功', 
-            f'已提交 {count} 张票据待审批，合计金额 ¥{total_amount:.2f}。\n请在"异常清单"中查看待审批列表。')
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                batch_no, count, total = ApprovalService.batch_submit(ids, applicant='admin')
+                if count > 0:
+                    self.refresh()
+                    QMessageBox.information(self, '成功',
+                        f'提交成功！\n\n审批单批次号: {batch_no}\n包含票据: {count} 张\n申请总金额: ¥{total:.2f}\n\n可在"异常清单 → 待审批清单"中查看。')
+                else:
+                    QMessageBox.warning(self, '提示', '没有可提交的票据（可能已在审批中）。')
+            except Exception as e:
+                QMessageBox.critical(self, '失败', f'提交审批失败：{str(e)}')

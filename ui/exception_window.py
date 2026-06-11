@@ -1,7 +1,8 @@
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QTabWidget, QMessageBox, QAbstractItemView,
-    QGroupBox, QFormLayout, QLineEdit, QComboBox, QTextEdit, QInputDialog
+    QGroupBox, QFormLayout, QLineEdit, QComboBox, QTextEdit, QInputDialog,
+    QSplitter
 )
 from PyQt6.QtCore import Qt
 
@@ -167,28 +168,53 @@ class ExceptionWindow(QWidget):
         bar.addWidget(self.approval_filter)
         bar.addStretch()
         
-        self.btn_approve = QPushButton('✅ 通过审批')
-        self.btn_approve.setStyleSheet(self._btn_style('#27ae60'))
-        self.btn_approve.clicked.connect(lambda: self._approve_reject('approve'))
-        bar.addWidget(self.btn_approve)
+        self.btn_approve_batch = QPushButton('✅ 通过该批次')
+        self.btn_approve_batch.setStyleSheet(self._btn_style('#27ae60'))
+        self.btn_approve_batch.clicked.connect(self._approve_batch)
+        bar.addWidget(self.btn_approve_batch)
         
-        self.btn_reject = QPushButton('❌ 驳回审批')
-        self.btn_reject.setStyleSheet(self._btn_style('#e74c3c'))
-        self.btn_reject.clicked.connect(lambda: self._approve_reject('reject'))
-        bar.addWidget(self.btn_reject)
+        self.btn_reject_batch = QPushButton('❌ 驳回该批次')
+        self.btn_reject_batch.setStyleSheet(self._btn_style('#e74c3c'))
+        self.btn_reject_batch.clicked.connect(self._reject_batch)
+        bar.addWidget(self.btn_reject_batch)
         
         tab_layout.addLayout(bar)
         
-        self.approval_table = QTableWidget(0, 10)
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        
+        upper_widget = QWidget()
+        upper_layout = QVBoxLayout(upper_widget)
+        upper_layout.setContentsMargins(0, 0, 0, 0)
+        upper_layout.addWidget(QLabel('📋 审批单列表（按批次，双击查看明细）'))
+        self.approval_table = QTableWidget(0, 7)
         self.approval_table.setHorizontalHeaderLabels([
-            'ID', '票据文件名', '申请人', '申请日期', '票据金额', '申请金额', '状态', '审批人', '审批日期', '审批意见'
+            '批次号', '申请人', '申请日期', '票据数量', '申请总金额', '状态', '审批意见'
         ])
         self.approval_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.approval_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.approval_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.approval_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.approval_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.approval_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        tab_layout.addWidget(self.approval_table)
+        self.approval_table.itemSelectionChanged.connect(self._on_select_approval_batch)
+        upper_layout.addWidget(self.approval_table, 1)
+        splitter.addWidget(upper_widget)
+        
+        lower_widget = QWidget()
+        lower_layout = QVBoxLayout(lower_widget)
+        lower_layout.setContentsMargins(0, 0, 0, 0)
+        lower_layout.addWidget(QLabel('📄 当前批次包含的票据明细'))
+        self.approval_detail_table = QTableWidget(0, 6)
+        self.approval_detail_table.setHorizontalHeaderLabels([
+            '票据ID', '文件名', '供应商', '开票日期', '价税合计', '可报销金额'
+        ])
+        self.approval_detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.approval_detail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.approval_detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        lower_layout.addWidget(self.approval_detail_table, 1)
+        splitter.addWidget(lower_widget)
+        splitter.setSizes([280, 220])
+        
+        tab_layout.addWidget(splitter, 1)
         
         self.tabs.addTab(tab, '📋 待审批清单')
 
@@ -282,38 +308,104 @@ class ExceptionWindow(QWidget):
 
     def _refresh_approval(self):
         status = self.approval_filter.currentData() or ''
-        approvals = ApprovalService.get_all(status=status)
+        batches = ApprovalService.get_batches(status=status)
         
-        self.approval_table.setRowCount(len(approvals))
-        for row, app in enumerate(approvals):
-            self.approval_table.setItem(row, 0, QTableWidgetItem(str(app.id)))
+        self.approval_table.setRowCount(len(batches))
+        for row, batch in enumerate(batches):
+            self.approval_table.setItem(row, 0, QTableWidgetItem(batch.batch_no))
+            self.approval_table.setItem(row, 1, QTableWidgetItem(batch.applicant))
+            self.approval_table.setItem(row, 2, QTableWidgetItem(batch.apply_date))
+            self.approval_table.setItem(row, 3, QTableWidgetItem(str(batch.invoice_count)))
+            self.approval_table.setItem(row, 4, QTableWidgetItem(f'{batch.total_amount:.2f}'))
             
-            inv_file_name = '-'
+            status_text = {'pending': '待审批', 'approved': '已通过', 'rejected': '已驳回'}.get(batch.status, batch.status)
+            status_item = QTableWidgetItem(status_text)
+            if batch.status == 'pending':
+                status_item.setBackground(Qt.GlobalColor.yellow)
+            elif batch.status == 'approved':
+                status_item.setBackground(Qt.GlobalColor.green)
+            elif batch.status == 'rejected':
+                status_item.setBackground(Qt.GlobalColor.red)
+            self.approval_table.setItem(row, 5, status_item)
+            
+            self.approval_table.setItem(row, 6, QTableWidgetItem(batch.approval_opinion))
+        
+        self.approval_detail_table.setRowCount(0)
+
+    def _on_select_approval_batch(self):
+        items = self.approval_table.selectedItems()
+        if not items:
+            self.approval_detail_table.setRowCount(0)
+            return
+        
+        row = items[0].row()
+        batch_no = self.approval_table.item(row, 0).text()
+        
+        items_list = ApprovalService.get_by_batch(batch_no)
+        self.approval_detail_table.setRowCount(len(items_list))
+        for i, app in enumerate(items_list):
+            inv_file = '-'
             inv_total = 0.0
+            inv_supplier = '-'
+            inv_date = '-'
             if app.invoice_id:
                 inv = InvoiceService.get_by_id(app.invoice_id)
                 if inv:
-                    inv_file_name = inv.file_name
+                    inv_file = inv.file_name
                     inv_total = inv.total_amount
-            self.approval_table.setItem(row, 1, QTableWidgetItem(inv_file_name))
-            self.approval_table.setItem(row, 2, QTableWidgetItem(app.applicant))
-            self.approval_table.setItem(row, 3, QTableWidgetItem(app.apply_date))
-            self.approval_table.setItem(row, 4, QTableWidgetItem(f'{inv_total:.2f}'))
-            self.approval_table.setItem(row, 5, QTableWidgetItem(f'{app.amount:.2f}'))
+                    inv_supplier = inv.supplier
+                    inv_date = inv.invoice_date
             
-            status_text = {'pending': '待审批', 'approved': '已通过', 'rejected': '已驳回'}.get(app.status, app.status)
-            status_item = QTableWidgetItem(status_text)
-            if app.status == 'pending':
-                status_item.setBackground(Qt.GlobalColor.yellow)
-            elif app.status == 'approved':
-                status_item.setBackground(Qt.GlobalColor.green)
-            elif app.status == 'rejected':
-                status_item.setBackground(Qt.GlobalColor.red)
-            self.approval_table.setItem(row, 6, status_item)
-            
-            self.approval_table.setItem(row, 7, QTableWidgetItem(app.approver))
-            self.approval_table.setItem(row, 8, QTableWidgetItem(app.approval_date))
-            self.approval_table.setItem(row, 9, QTableWidgetItem(app.approval_opinion))
+            self.approval_detail_table.setItem(i, 0, QTableWidgetItem(str(app.invoice_id)))
+            self.approval_detail_table.setItem(i, 1, QTableWidgetItem(inv_file))
+            self.approval_detail_table.setItem(i, 2, QTableWidgetItem(inv_supplier))
+            self.approval_detail_table.setItem(i, 3, QTableWidgetItem(inv_date))
+            self.approval_detail_table.setItem(i, 4, QTableWidgetItem(f'{inv_total:.2f}'))
+            self.approval_detail_table.setItem(i, 5, QTableWidgetItem(f'{app.amount:.2f}'))
+
+    def _approve_batch(self):
+        items = self.approval_table.selectedItems()
+        if not items:
+            QMessageBox.warning(self, '提示', '请先选择一个审批批次。')
+            return
+        
+        row = items[0].row()
+        batch_no = self.approval_table.item(row, 0).text()
+        
+        opinion, ok = QInputDialog.getText(self, '审批通过', '请输入审批意见（可选）:')
+        if not ok:
+            return
+        
+        reply = QMessageBox.question(self, '确认通过',
+            f'确定通过该批次审批？\n批次号: {batch_no}',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            count = ApprovalService.approve_batch(batch_no, approver='admin', opinion=opinion)
+            self.refresh()
+            QMessageBox.information(self, '成功', f'已通过审批，共 {count} 张票据。')
+
+    def _reject_batch(self):
+        items = self.approval_table.selectedItems()
+        if not items:
+            QMessageBox.warning(self, '提示', '请先选择一个审批批次。')
+            return
+        
+        row = items[0].row()
+        batch_no = self.approval_table.item(row, 0).text()
+        
+        opinion, ok = QInputDialog.getText(self, '审批驳回', '请输入驳回意见:')
+        if not ok:
+            return
+        
+        reply = QMessageBox.question(self, '确认驳回',
+            f'确定驳回该批次审批？\n批次号: {batch_no}',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            count = ApprovalService.reject_batch(batch_no, approver='admin', opinion=opinion)
+            self.refresh()
+            QMessageBox.information(self, '成功', f'已驳回审批，共 {count} 张票据。')
 
     def _detect_duplicates(self):
         duplicates = InvoiceService.detect_duplicates()
@@ -355,31 +447,3 @@ class ExceptionWindow(QWidget):
             InvoiceService.update(inv_id, {'has_attachment': int(has_attach)})
         self.refresh()
         QMessageBox.information(self, '成功', f'已更新 {len(ids)} 张票据的附件状态。')
-
-    def _approve_reject(self, action: str):
-        ids = self._get_selected_ids(self.approval_table)
-        if not ids:
-            QMessageBox.warning(self, '提示', '请先选择要审批的记录。')
-            return
-        
-        if action == 'reject':
-            opinion, ok = QInputDialog.getText(self, '驳回原因', '请输入驳回意见:')
-            if not ok:
-                return
-        else:
-            opinion, ok = QInputDialog.getText(self, '审批意见', '请输入审批意见（可选）:')
-            opinion = opinion if ok else ''
-        
-        approver = 'admin'
-        count = 0
-        for app_id in ids:
-            if action == 'approve':
-                if ApprovalService.approve(app_id, approver, opinion):
-                    count += 1
-            else:
-                if ApprovalService.reject(app_id, approver, opinion):
-                    count += 1
-        
-        self.refresh()
-        action_text = '通过' if action == 'approve' else '驳回'
-        QMessageBox.information(self, '完成', f'已{action_text} {count} 条审批记录。')

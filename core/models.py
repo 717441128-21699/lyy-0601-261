@@ -108,6 +108,7 @@ class OperationLog:
 class ApprovalList:
     id: Optional[int] = None
     invoice_id: Optional[int] = None
+    batch_no: str = ''
     applicant: str = ''
     apply_date: str = ''
     amount: float = 0.0
@@ -116,6 +117,19 @@ class ApprovalList:
     approval_date: str = ''
     approval_opinion: str = ''
     created_at: str = ''
+
+
+@dataclass
+class ApprovalBatch:
+    batch_no: str = ''
+    applicant: str = ''
+    apply_date: str = ''
+    total_amount: float = 0.0
+    invoice_count: int = 0
+    status: str = 'pending'
+    approver: str = ''
+    approval_date: str = ''
+    approval_opinion: str = ''
 
 
 @dataclass
@@ -130,6 +144,18 @@ class StatisticsSummary:
     pending_count: int = 0
     approved_count: int = 0
     rejected_count: int = 0
+
+
+@dataclass
+class ImportResult:
+    success: bool = False
+    invoice_count: int = 0
+    payment_count: int = 0
+    skipped_invoice_count: int = 0
+    skipped_payment_count: int = 0
+    skipped_details: List[str] = field(default_factory=list)
+    batch_no: str = ''
+    error_msg: str = ''
 
 
 STATUS_MAP = {

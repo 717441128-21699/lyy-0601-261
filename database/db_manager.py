@@ -129,6 +129,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS approval_lists (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 invoice_id INTEGER,
+                batch_no TEXT,
                 applicant TEXT,
                 apply_date TEXT,
                 amount REAL DEFAULT 0,
@@ -141,7 +142,24 @@ class DatabaseManager:
             );
         ''')
         self._conn.commit()
+        self._migrate_tables()
         self._init_default_data()
+
+    def _migrate_tables(self):
+        cursor = self._conn.cursor()
+        try:
+            cursor.execute("PRAGMA table_info(approval_lists)")
+            cols = [row[1] for row in cursor.fetchall()]
+            if 'batch_no' not in cols:
+                cursor.execute("ALTER TABLE approval_lists ADD COLUMN batch_no TEXT")
+                self._conn.commit()
+        except Exception:
+            pass
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_approval_batch ON approval_lists(batch_no)")
+            self._conn.commit()
+        except Exception:
+            pass
 
     def _init_default_data(self):
         cursor = self._conn.cursor()

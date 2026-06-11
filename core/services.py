@@ -10,6 +10,7 @@ from database.db_manager import get_db
 from core.models import (
     Invoice, Payment, Category, Department, Project,
     Rule, OperationLog, ApprovalList, StatisticsSummary,
+    ImportResult, ApprovalBatch,
     STATUS_MAP, MATCH_STATUS_MAP, RULE_TYPE_MAP
 )
 
@@ -147,6 +148,32 @@ class InvoiceService:
         if rows > 0:
             InvoiceService._safe_log(db, 'update', 'invoice', invoice_id, f'更新票据信息')
         return rows > 0
+
+    @staticmethod
+    def batch_update(ids: List[int], data: Dict) -> int:
+        if not ids or not data:
+            return 0
+        db = get_db()
+        if 'is_duplicate' in data:
+            data['is_duplicate'] = int(data['is_duplicate'])
+        if 'has_attachment' in data:
+            data['has_attachment'] = int(data['has_attachment'])
+        
+        data['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        placeholders = ','.join(['?'] * len(ids))
+        set_clause = ', '.join([f'{k} = ?' for k in data.keys()])
+        sql = f'UPDATE invoices SET {set_clause} WHERE id IN ({placeholders})'
+        params = list(data.values()) + ids
+        
+        cursor = db.execute(sql, tuple(params))
+        db.commit()
+        rows = cursor.rowcount
+        
+        if rows > 0:
+            InvoiceService._safe_log(db, 'batch_update', 'invoice', 0, 
+                                      f'批量更新 {rows} 张票据')
+        return rows
 
     @staticmethod
     def delete(invoice_id: int) -> bool:
@@ -419,6 +446,9 @@ class ProjectService:
     @staticmethod
     def create(project: Project) -> int:
         db = get_db()
+        existing = db.query_one('SELECT id FROM projects WHERE name = ?', (project.name,))
+        if existing:
+            return existing['id']
         data = {
             'name': project.name,
             'code': project.code,
@@ -427,7 +457,20 @@ class ProjectService:
             'start_date': project.start_date,
             'end_date': project.end_date
         }
-        return db.insert('projects', data)
+        new_id = db.insert('projects', data)
+        InvoiceService._safe_log(db, 'create', 'project', new_id, f'新增项目: {project.name}')
+        return new_id
+
+    @staticmethod
+    def get_by_name(name: str) -> Optional[Project]:
+        db = get_db()
+        row = db.query_one('SELECT * FROM projects WHERE name = ?', (name,))
+        if row:
+            return Project(id=row['id'], name=row['name'], code=row['code'] or '',
+                          manager=row['manager'] or '', description=row['description'] or '',
+                          start_date=row['start_date'] or '', end_date=row['end_date'] or '',
+                          created_at=row['created_at'] or '')
+        return None
 
 
 class RuleService:
@@ -508,6 +551,11 @@ class RuleService:
 
 class ApprovalService:
     @staticmethod
+    def _gen_batch_no() -> str:
+        now = datetime.now()
+        return f'APV{now.strftime("%Y%m%d%H%M%S")}'
+
+    @staticmethod
     def get_all(status: str = '') -> List[ApprovalList]:
         db = get_db()
         sql = 'SELECT * FROM approval_lists WHERE 1=1'
@@ -519,6 +567,47 @@ class ApprovalService:
         rows = db.query(sql, tuple(params))
         return [ApprovalList(
             id=r['id'], invoice_id=r['invoice_id'],
+            batch_no=r['batch_no'] or '',
+            applicant=r['applicant'] or '', apply_date=r['apply_date'] or '',
+            amount=r['amount'] or 0, status=r['status'] or 'pending',
+            approver=r['approver'] or '', approval_date=r['approval_date'] or '',
+            approval_opinion=r['approval_opinion'] or '', created_at=r['created_at'] or ''
+        ) for r in rows]
+
+    @staticmethod
+    def get_batches(status: str = '') -> List[ApprovalBatch]:
+        db = get_db()
+        sql = '''SELECT batch_no, applicant, apply_date, 
+                        COALESCE(SUM(amount), 0) as total_amount,
+                        COUNT(*) as invoice_count,
+                        status, approver, approval_date, approval_opinion
+                 FROM approval_lists 
+                 WHERE batch_no IS NOT NULL AND batch_no != ?'''
+        params = ['']
+        if status:
+            sql += ' AND status = ?'
+            params.append(status)
+        sql += ' GROUP BY batch_no ORDER BY MAX(created_at) DESC'
+        rows = db.query(sql, tuple(params))
+        return [ApprovalBatch(
+            batch_no=r['batch_no'] or '',
+            applicant=r['applicant'] or '',
+            apply_date=r['apply_date'] or '',
+            total_amount=r['total_amount'] or 0,
+            invoice_count=r['invoice_count'] or 0,
+            status=r['status'] or 'pending',
+            approver=r['approver'] or '',
+            approval_date=r['approval_date'] or '',
+            approval_opinion=r['approval_opinion'] or ''
+        ) for r in rows]
+
+    @staticmethod
+    def get_by_batch(batch_no: str) -> List[ApprovalList]:
+        db = get_db()
+        rows = db.query('SELECT * FROM approval_lists WHERE batch_no = ? ORDER BY id', (batch_no,))
+        return [ApprovalList(
+            id=r['id'], invoice_id=r['invoice_id'],
+            batch_no=r['batch_no'] or '',
             applicant=r['applicant'] or '', apply_date=r['apply_date'] or '',
             amount=r['amount'] or 0, status=r['status'] or 'pending',
             approver=r['approver'] or '', approval_date=r['approval_date'] or '',
@@ -530,6 +619,7 @@ class ApprovalService:
         db = get_db()
         data = {
             'invoice_id': approval.invoice_id,
+            'batch_no': approval.batch_no,
             'applicant': approval.applicant,
             'apply_date': approval.apply_date,
             'amount': approval.amount,
@@ -538,8 +628,49 @@ class ApprovalService:
         new_id = db.insert('approval_lists', data)
         if approval.invoice_id:
             InvoiceService.update(approval.invoice_id, {'status': 'reviewing'})
-        db.log_operation('create', 'approval', new_id, f'创建待审批清单')
+        InvoiceService._safe_log(db, 'create', 'approval', new_id, f'创建待审批清单')
         return new_id
+
+    @staticmethod
+    def batch_submit(invoice_ids: List[int], applicant: str = 'admin') -> Tuple[str, int, float]:
+        db = get_db()
+        if not invoice_ids:
+            return '', 0, 0.0
+        
+        batch_no = ApprovalService._gen_batch_no()
+        now = datetime.now()
+        apply_date = now.strftime('%Y-%m-%d')
+        
+        total_amount = 0.0
+        count = 0
+        
+        db.begin_transaction()
+        try:
+            for inv_id in invoice_ids:
+                inv = InvoiceService.get_by_id(inv_id)
+                if not inv:
+                    continue
+                amount = inv.reimbursable_amount if inv.reimbursable_amount > 0 else inv.total_amount
+                db.insert_raw('approval_lists', {
+                    'invoice_id': inv_id,
+                    'batch_no': batch_no,
+                    'applicant': applicant,
+                    'apply_date': apply_date,
+                    'amount': amount,
+                    'status': 'pending'
+                })
+                db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('reviewing', inv_id))
+                total_amount += amount
+                count += 1
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        
+        InvoiceService._safe_log(db, 'batch_submit', 'approval', 0, 
+                                  f'批次[{batch_no}] 提交审批: {count}张票据, 合计{total_amount:.2f}元')
+        
+        return batch_no, count, total_amount
 
     @staticmethod
     def approve(approval_id: int, approver: str = '', opinion: str = '') -> bool:
@@ -555,7 +686,7 @@ class ApprovalService:
             approval = db.query_one('SELECT * FROM approval_lists WHERE id = ?', (approval_id,))
             if approval and approval['invoice_id']:
                 InvoiceService.update(approval['invoice_id'], {'status': 'approved'})
-            db.log_operation('approve', 'approval', approval_id, f'审批通过')
+            InvoiceService._safe_log(db, 'approve', 'approval', approval_id, f'审批通过')
         return rows > 0
 
     @staticmethod
@@ -572,8 +703,50 @@ class ApprovalService:
             approval = db.query_one('SELECT * FROM approval_lists WHERE id = ?', (approval_id,))
             if approval and approval['invoice_id']:
                 InvoiceService.update(approval['invoice_id'], {'status': 'rejected'})
-            db.log_operation('reject', 'approval', approval_id, f'审批驳回')
+            InvoiceService._safe_log(db, 'reject', 'approval', approval_id, f'审批驳回')
         return rows > 0
+
+    @staticmethod
+    def approve_batch(batch_no: str, approver: str = '', opinion: str = '') -> int:
+        db = get_db()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        rows = db.update('approval_lists', {
+            'status': 'approved',
+            'approver': approver,
+            'approval_date': now,
+            'approval_opinion': opinion
+        }, 'batch_no = ?', (batch_no,))
+        
+        if rows > 0:
+            items = db.query('SELECT invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+            for item in items:
+                if item['invoice_id']:
+                    db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('approved', item['invoice_id']))
+            db.commit()
+            InvoiceService._safe_log(db, 'approve_batch', 'approval', 0, 
+                                      f'批次[{batch_no}] 审批通过: {rows}张票据')
+        return rows
+
+    @staticmethod
+    def reject_batch(batch_no: str, approver: str = '', opinion: str = '') -> int:
+        db = get_db()
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        rows = db.update('approval_lists', {
+            'status': 'rejected',
+            'approver': approver,
+            'approval_date': now,
+            'approval_opinion': opinion
+        }, 'batch_no = ?', (batch_no,))
+        
+        if rows > 0:
+            items = db.query('SELECT invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+            for item in items:
+                if item['invoice_id']:
+                    db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('rejected', item['invoice_id']))
+            db.commit()
+            InvoiceService._safe_log(db, 'reject_batch', 'approval', 0, 
+                                      f'批次[{batch_no}] 审批驳回: {rows}张票据')
+        return rows
 
 
 class StatisticsService:
@@ -858,10 +1031,17 @@ class OCRService:
 
 class FileImportService:
     @staticmethod
-    def import_images(file_paths: List[str]) -> List[Invoice]:
+    def _gen_batch_no(prefix: str = 'IMP') -> str:
+        now = datetime.now()
+        return f'{prefix}{now.strftime("%Y%m%d%H%M%S")}'
+
+    @staticmethod
+    def import_images(file_paths: List[str]) -> Tuple[List[Invoice], List[str]]:
         invoices = []
-        for path in file_paths:
+        skipped = []
+        for i, path in enumerate(file_paths):
             if not os.path.exists(path):
+                skipped.append(f'第{i+1}张: 文件不存在 - {os.path.basename(path)}')
                 continue
             file_name = os.path.basename(path)
             ocr_result = OCRService.recognize(path)
@@ -882,41 +1062,56 @@ class FileImportService:
                 ocr_result=ocr_result['raw_text']
             )
             invoices.append(invoice)
-        return invoices
+        return invoices, skipped
 
     @staticmethod
-    def import_excel(file_path: str) -> Tuple[List[Invoice], List[Payment]]:
+    def import_excel(file_path: str) -> Tuple[List[Invoice], List[Payment], List[str]]:
         invoices = []
         payments = []
+        skipped = []
         
         try:
             xls = pd.ExcelFile(file_path)
             for sheet_name in xls.sheet_names:
                 df = pd.read_excel(file_path, sheet_name=sheet_name)
                 if df.empty:
+                    skipped.append(f'Sheet[{sheet_name}]: 空表，已跳过')
                     continue
                 
                 df.columns = [str(c).strip() for c in df.columns]
-                
-                if any(c in df.columns for c in ['发票号', '发票号码', 'invoice_no', 'invoice number']):
-                    for _, row in df.iterrows():
+                has_invoice_cols = any(c in df.columns for c in ['发票号', '发票号码', 'invoice_no', 'invoice number'])
+                has_payment_cols = any(c in df.columns for c in ['流水号', '付款流水号', 'payment_no'])
+
+                if has_invoice_cols:
+                    inv_skipped = 0
+                    for idx, (_, row) in enumerate(df.iterrows()):
                         inv = Invoice()
+                        has_data = False
                         for col in df.columns:
                             val = '' if pd.isna(row[col]) else str(row[col]).strip()
                             col_lower = col.lower()
                             if col in ['发票号', '发票号码'] or 'invoice_no' in col_lower or 'invoice number' in col_lower:
                                 inv.invoice_no = val
+                                if val:
+                                    has_data = True
                             elif col in ['发票代码']:
                                 inv.invoice_code = val
                             elif col in ['开票日期', '日期'] or 'date' in col_lower:
                                 inv.invoice_date = val
+                                if val:
+                                    has_data = True
                             elif col in ['供应商', '销售方', '收款方'] or 'supplier' in col_lower:
                                 inv.supplier = val
+                                if val:
+                                    has_data = True
                             elif col in ['购买方', '客户'] or 'buyer' in col_lower:
                                 inv.buyer = val
                             elif col in ['金额', '不含税金额'] or 'amount' in col_lower:
                                 try:
-                                    inv.amount = float(val)
+                                    v = float(val)
+                                    inv.amount = v
+                                    if v > 0:
+                                        has_data = True
                                 except ValueError:
                                     pass
                             elif col in ['税额'] or 'tax' in col_lower:
@@ -926,7 +1121,10 @@ class FileImportService:
                                     pass
                             elif col in ['价税合计', '总金额', '合计'] or 'total' in col_lower:
                                 try:
-                                    inv.total_amount = float(val)
+                                    v = float(val)
+                                    inv.total_amount = v
+                                    if v > 0:
+                                        has_data = True
                                 except ValueError:
                                     pass
                             elif col in ['费用类别', '类别'] or 'category' in col_lower:
@@ -937,25 +1135,44 @@ class FileImportService:
                                 inv.project = val
                             elif col in ['备注'] or 'remark' in col_lower:
                                 inv.remark = val
-                        invoices.append(inv)
-                
-                if any(c in df.columns for c in ['流水号', '付款流水号', 'payment_no']):
-                    for _, row in df.iterrows():
+                        
+                        if has_data and inv.total_amount > 0:
+                            if inv.reimbursable_amount == 0:
+                                inv.reimbursable_amount = inv.total_amount
+                            invoices.append(inv)
+                        else:
+                            inv_skipped += 1
+                    if inv_skipped > 0:
+                        skipped.append(f'Sheet[{sheet_name}]-票据: 跳过 {inv_skipped} 条空行/无有效数据的行')
+
+                if has_payment_cols:
+                    pay_skipped = 0
+                    for idx, (_, row) in enumerate(df.iterrows()):
                         pay = Payment()
+                        has_data = False
                         for col in df.columns:
                             val = '' if pd.isna(row[col]) else str(row[col]).strip()
                             col_lower = col.lower()
                             if col in ['流水号', '付款流水号'] or 'payment_no' in col_lower:
                                 pay.payment_no = val
+                                if val:
+                                    has_data = True
                             elif col in ['付款日期', '支付日期'] or 'pay_date' in col_lower or 'payment date' in col_lower:
                                 pay.pay_date = val
                             elif col in ['付款金额', '支付金额'] or 'pay_amount' in col_lower or 'amount' in col_lower:
+                                if 'total' in col_lower or '价税' in col or '合计' in col:
+                                    continue
                                 try:
-                                    pay.pay_amount = float(val)
+                                    v = float(val)
+                                    pay.pay_amount = v
+                                    if v > 0:
+                                        has_data = True
                                 except ValueError:
                                     pass
                             elif col in ['收款方', '收款人', '供应商'] or 'payee' in col_lower:
                                 pay.payee = val
+                                if val:
+                                    has_data = True
                             elif col in ['银行账号', '账号'] or 'account' in col_lower:
                                 pay.bank_account = val
                             elif col in ['开户行', '开户银行'] or 'bank' in col_lower:
@@ -964,23 +1181,73 @@ class FileImportService:
                                 pay.purpose = val
                             elif col in ['备注'] or 'remark' in col_lower:
                                 pay.remark = val
-                        payments.append(pay)
+                        
+                        if has_data and pay.pay_amount > 0:
+                            payments.append(pay)
+                        else:
+                            pay_skipped += 1
+                    if pay_skipped > 0:
+                        skipped.append(f'Sheet[{sheet_name}]-流水: 跳过 {pay_skipped} 条空行/无有效数据的行')
+
+                if not has_invoice_cols and not has_payment_cols:
+                    skipped.append(f'Sheet[{sheet_name}]: 未识别到票据或流水列，已跳过')
         except Exception as e:
-            print(f'导入Excel失败: {str(e)}')
+            skipped.append(f'读取失败: {str(e)}')
         
-        return invoices, payments
+        return invoices, payments, skipped
 
     @staticmethod
-    def import_csv(file_path: str) -> Tuple[List[Invoice], List[Payment]]:
+    def import_csv(file_path: str) -> Tuple[List[Invoice], List[Payment], List[str]]:
         invoices = []
         payments = []
+        skipped = []
         try:
             df = pd.read_csv(file_path)
             temp_xlsx = file_path + '.xlsx'
             df.to_excel(temp_xlsx, index=False)
-            invoices, payments = FileImportService.import_excel(temp_xlsx)
+            invoices, payments, skipped = FileImportService.import_excel(temp_xlsx)
             if os.path.exists(temp_xlsx):
                 os.remove(temp_xlsx)
         except Exception as e:
-            print(f'导入CSV失败: {str(e)}')
-        return invoices, payments
+            skipped.append(f'CSV读取失败: {str(e)}')
+        return invoices, payments, skipped
+
+    @staticmethod
+    def batch_import(invoices: List[Invoice], payments: List[Payment], source: str = '手动导入') -> ImportResult:
+        db = get_db()
+        batch_no = FileImportService._gen_batch_no()
+        result = ImportResult(batch_no=batch_no)
+
+        if not invoices and not payments:
+            result.error_msg = '没有可导入的数据'
+            return result
+
+        db.begin_transaction()
+        try:
+            inv_ids = []
+            for inv in invoices:
+                new_id = InvoiceService.create_in_transaction(db, inv)
+                inv_ids.append(new_id)
+            result.invoice_count = len(inv_ids)
+
+            pay_ids = []
+            for pay in payments:
+                new_id = PaymentService.create_in_transaction(db, pay)
+                pay_ids.append(new_id)
+            result.payment_count = len(pay_ids)
+
+            db.commit()
+            result.success = True
+        except Exception as e:
+            db.rollback()
+            result.success = False
+            result.error_msg = str(e)
+            return result
+
+        try:
+            detail = f'批次[{batch_no}] {source}: 成功导入票据{result.invoice_count}张, 流水{result.payment_count}条'
+            InvoiceService._safe_log(db, 'batch_import', 'import', 0, detail)
+        except Exception:
+            pass
+
+        return result

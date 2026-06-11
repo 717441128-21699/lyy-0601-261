@@ -1,9 +1,11 @@
 import os
+from typing import List
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QLineEdit, QComboBox, QDateEdit,
     QDoubleSpinBox, QTextEdit, QFormLayout, QGroupBox, QSplitter,
-    QMessageBox, QFileDialog, QAbstractItemView, QCheckBox
+    QMessageBox, QFileDialog, QAbstractItemView, QCheckBox, QDialog,
+    QDialogButtonBox, QInputDialog
 )
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QPixmap
@@ -54,6 +56,11 @@ class InvoiceWindow(QWidget):
         self.btn_ocr.setStyleSheet(self._btn_style('#8e44ad'))
         self.btn_ocr.clicked.connect(self._re_ocr)
         filter_layout.addWidget(self.btn_ocr)
+        
+        self.btn_batch = QPushButton('📝 批量修正')
+        self.btn_batch.setStyleSheet(self._btn_style('#e67e22'))
+        self.btn_batch.clicked.connect(self._batch_edit)
+        filter_layout.addWidget(self.btn_batch)
         
         filter_layout.addStretch()
         layout.addLayout(filter_layout)
@@ -373,3 +380,135 @@ class InvoiceWindow(QWidget):
                 self._current_invoice_id = None
                 self.refresh()
                 QMessageBox.information(self, '成功', '票据已删除。')
+
+    def _get_selected_ids(self) -> List[int]:
+        ids = []
+        items = self.table.selectedItems()
+        if not items:
+            return ids
+        rows = set(item.row() for item in items)
+        for row in rows:
+            item = self.table.item(row, 0)
+            if item:
+                ids.append(int(item.text()))
+        return ids
+
+    def _batch_edit(self):
+        ids = self._get_selected_ids()
+        if not ids:
+            QMessageBox.warning(self, '提示', '请先在左侧列表中选择要批量修正的票据（按住Ctrl可多选）。')
+            return
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f'批量修正 ({len(ids)} 张票据)')
+        dialog.setMinimumWidth(420)
+        
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        
+        dept_check = QCheckBox('修改部门')
+        dept_combo = QComboBox()
+        dept_combo.addItem('')
+        dept_combo.addItems(DepartmentService.get_names())
+        dept_combo.setEnabled(False)
+        dept_check.toggled.connect(dept_combo.setEnabled)
+        dept_layout = QHBoxLayout()
+        dept_layout.addWidget(dept_check)
+        dept_layout.addWidget(dept_combo, 1)
+        form.addRow('部门:', dept_layout)
+        
+        proj_check = QCheckBox('修改项目')
+        proj_combo = QComboBox()
+        proj_combo.addItem('')
+        proj_combo.addItems(ProjectService.get_names())
+        proj_combo.setEnabled(False)
+        proj_check.toggled.connect(proj_combo.setEnabled)
+        proj_layout = QHBoxLayout()
+        proj_layout.addWidget(proj_check)
+        proj_layout.addWidget(proj_combo, 1)
+        form.addRow('项目:', proj_layout)
+        
+        cat_check = QCheckBox('修改类别')
+        cat_combo = QComboBox()
+        cat_combo.addItem('')
+        cat_combo.addItems(CategoryService.get_names())
+        cat_combo.setEnabled(False)
+        cat_check.toggled.connect(cat_combo.setEnabled)
+        cat_layout = QHBoxLayout()
+        cat_layout.addWidget(cat_check)
+        cat_layout.addWidget(cat_combo, 1)
+        form.addRow('费用类别:', cat_layout)
+        
+        supp_check = QCheckBox('供应商关键词')
+        supp_input = QLineEdit()
+        supp_input.setPlaceholderText('输入关键词，将匹配替换为完整供应商名')
+        supp_input.setEnabled(False)
+        supp_check.toggled.connect(supp_input.setEnabled)
+        supp_layout = QHBoxLayout()
+        supp_layout.addWidget(supp_check)
+        supp_layout.addWidget(supp_input, 1)
+        form.addRow('供应商:', supp_layout)
+        
+        ratio_check = QCheckBox('报销比例(%)')
+        ratio_spin = QDoubleSpinBox()
+        ratio_spin.setRange(0, 100)
+        ratio_spin.setValue(100)
+        ratio_spin.setSuffix(' %')
+        ratio_spin.setEnabled(False)
+        ratio_check.toggled.connect(ratio_spin.setEnabled)
+        ratio_layout = QHBoxLayout()
+        ratio_layout.addWidget(ratio_check)
+        ratio_layout.addWidget(ratio_spin, 1)
+        form.addRow('报销比例:', ratio_layout)
+        
+        layout.addLayout(form)
+        
+        tip = QLabel('💡 勾选需要修改的字段，未勾选的保持不变')
+        tip.setStyleSheet('color: #666; font-size: 12px;')
+        layout.addWidget(tip)
+        
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            data = {}
+            if dept_check.isChecked() and dept_combo.currentText():
+                data['department'] = dept_combo.currentText()
+            if proj_check.isChecked() and proj_combo.currentText():
+                data['project'] = proj_combo.currentText()
+            if cat_check.isChecked() and cat_combo.currentText():
+                data['category'] = cat_combo.currentText()
+            if supp_check.isChecked() and supp_input.text().strip():
+                keyword = supp_input.text().strip()
+                all_invs = InvoiceService.get_all(keyword=keyword)
+                supp_name = ''
+                for inv in all_invs:
+                    if inv.supplier and keyword.lower() in inv.supplier.lower():
+                        supp_name = inv.supplier
+                        break
+                if supp_name:
+                    data['supplier'] = supp_name
+                else:
+                    QMessageBox.warning(self, '提示', f'未找到匹配的供应商名称（关键词：{keyword}），供应商字段将被跳过。')
+            
+            if ratio_check.isChecked():
+                ratio = ratio_spin.value() / 100.0
+                for inv_id in ids:
+                    inv = InvoiceService.get_by_id(inv_id)
+                    if inv and inv.total_amount > 0:
+                        new_reimb = round(inv.total_amount * ratio, 2)
+                        InvoiceService.update(inv_id, {'reimbursable_amount': new_reimb})
+            
+            if data:
+                count = InvoiceService.batch_update(ids, data)
+                self.refresh()
+                QMessageBox.information(self, '成功', f'已批量修正 {count} 张票据。\n报销归类、异常清单、统计报表会同步更新。')
+            elif ratio_check.isChecked():
+                self.refresh()
+                QMessageBox.information(self, '成功', f'已更新 {len(ids)} 张票据的报销比例。')
+            else:
+                QMessageBox.information(self, '提示', '未选择任何要修改的字段。')

@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPixmap
 
 from core.services import FileImportService, InvoiceService, PaymentService
-from core.models import Invoice, Payment
+from core.models import Invoice, Payment, ImportResult
 
 
 class ImportWindow(QWidget):
@@ -16,6 +16,7 @@ class ImportWindow(QWidget):
         super().__init__()
         self._pending_invoices = []
         self._pending_payments = []
+        self._last_skipped = []
         self._init_ui()
 
     def _init_ui(self):
@@ -129,10 +130,17 @@ class ImportWindow(QWidget):
             '图片文件 (*.jpg *.jpeg *.png *.bmp *.gif *.tiff);;所有文件 (*.*)'
         )
         if files:
-            invoices = FileImportService.import_images(files)
+            invoices, skipped = FileImportService.import_images(files)
             self._pending_invoices.extend(invoices)
+            self._last_skipped = skipped
             self._refresh_invoice_table()
-            QMessageBox.information(self, '成功', f'已导入 {len(invoices)} 张图片，可在列表中预览并核对。')
+            
+            msg = f'已读取 {len(invoices)} 张图片，可在列表中预览并核对。'
+            if skipped:
+                msg += f'\n\n跳过 {len(skipped)} 条：\n' + '\n'.join(skipped[:5])
+                if len(skipped) > 5:
+                    msg += f'\n... 共 {len(skipped)} 条'
+            QMessageBox.information(self, '成功', msg)
 
     def _import_excel(self):
         file, _ = QFileDialog.getOpenFileName(
@@ -140,13 +148,19 @@ class ImportWindow(QWidget):
             'Excel文件 (*.xlsx *.xls);;所有文件 (*.*)'
         )
         if file:
-            invoices, payments = FileImportService.import_excel(file)
+            invoices, payments, skipped = FileImportService.import_excel(file)
             self._pending_invoices.extend(invoices)
             self._pending_payments.extend(payments)
+            self._last_skipped = skipped
             self._refresh_invoice_table()
             self._refresh_payment_table()
-            QMessageBox.information(self, '成功', 
-                f'已读取Excel文件：\n- 票据: {len(invoices)} 条\n- 付款流水: {len(payments)} 条')
+            
+            msg = f'已读取Excel文件：\n- 票据: {len(invoices)} 条\n- 付款流水: {len(payments)} 条'
+            if skipped:
+                msg += f'\n\n跳过 {len(skipped)} 项：\n' + '\n'.join(skipped[:8])
+                if len(skipped) > 8:
+                    msg += f'\n... 共 {len(skipped)} 项'
+            QMessageBox.information(self, '成功', msg)
 
     def _import_csv(self):
         file, _ = QFileDialog.getOpenFileName(
@@ -154,13 +168,19 @@ class ImportWindow(QWidget):
             'CSV文件 (*.csv);;所有文件 (*.*)'
         )
         if file:
-            invoices, payments = FileImportService.import_csv(file)
+            invoices, payments, skipped = FileImportService.import_csv(file)
             self._pending_invoices.extend(invoices)
             self._pending_payments.extend(payments)
+            self._last_skipped = skipped
             self._refresh_invoice_table()
             self._refresh_payment_table()
-            QMessageBox.information(self, '成功', 
-                f'已读取CSV文件：\n- 票据: {len(invoices)} 条\n- 付款流水: {len(payments)} 条')
+            
+            msg = f'已读取CSV文件：\n- 票据: {len(invoices)} 条\n- 付款流水: {len(payments)} 条'
+            if skipped:
+                msg += f'\n\n跳过 {len(skipped)} 项：\n' + '\n'.join(skipped[:8])
+                if len(skipped) > 8:
+                    msg += f'\n... 共 {len(skipped)} 项'
+            QMessageBox.information(self, '成功', msg)
 
     def _refresh_invoice_table(self):
         self.invoice_table.setRowCount(len(self._pending_invoices))
@@ -194,38 +214,41 @@ class ImportWindow(QWidget):
             return
         
         reply = QMessageBox.question(self, '确认导入',
-            f'确认导入以下数据到数据库？\n- 票据: {len(self._pending_invoices)} 条\n- 付款流水: {len(self._pending_payments)} 条',
+            f'确认导入以下数据到数据库？\n- 票据: {len(self._pending_invoices)} 条\n- 付款流水: {len(self._pending_payments)} 条\n\n(票据和流水将在同一事务中入库，任意一边失败则全部回滚)',
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.Yes:
             self.progress_bar.setVisible(True)
-            self.progress_bar.setMaximum(len(self._pending_invoices) + len(self._pending_payments))
-            self.progress_bar.setValue(0)
+            self.progress_bar.setMaximum(100)
+            self.progress_bar.setValue(10)
             
-            try:
-                inv_count = 0
-                if self._pending_invoices:
-                    InvoiceService.batch_create(self._pending_invoices)
-                    inv_count = len(self._pending_invoices)
-                    self.progress_bar.setValue(inv_count)
-                
-                pay_count = 0
-                if self._pending_payments:
-                    PaymentService.batch_create(self._pending_payments)
-                    pay_count = len(self._pending_payments)
-                    self.progress_bar.setValue(inv_count + pay_count)
-                
+            result = FileImportService.batch_import(
+                self._pending_invoices, 
+                self._pending_payments,
+                source='手动导入'
+            )
+            
+            self.progress_bar.setValue(100)
+            
+            if result.success:
                 self._pending_invoices.clear()
                 self._pending_payments.clear()
                 self._refresh_invoice_table()
                 self._refresh_payment_table()
                 
+                detail = f'导入成功！\n\n批次号: {result.batch_no}\n- 新增票据: {result.invoice_count} 张\n- 新增流水: {result.payment_count} 条'
+                if self._last_skipped:
+                    detail += f'\n- 跳过数据: {len(self._last_skipped)} 项'
+                detail += '\n\n可在"规则设置 → 操作记录"中按批次号查询。'
+                detail += '\n请前往"票据识别核对"继续处理。'
+                
                 self.progress_bar.setVisible(False)
-                QMessageBox.information(self, '导入完成',
-                    f'成功导入：\n- 票据: {inv_count} 条\n- 付款流水: {pay_count} 条\n请前往"票据识别核对"继续处理。')
-            except Exception as e:
+                QMessageBox.information(self, '导入完成', detail)
+            else:
                 self.progress_bar.setVisible(False)
-                QMessageBox.critical(self, '导入失败', f'导入过程中出现错误，数据已回滚，未写入数据库：\n{str(e)}')
+                detail = f'导入失败，数据已全部回滚（未写入数据库）。\n\n错误原因: {result.error_msg}'
+                detail += '\n\n待导入列表已保留，您可以修正文件后重新点击导入。'
+                QMessageBox.critical(self, '导入失败', detail)
 
     def _clear_list(self):
         if self._pending_invoices or self._pending_payments:
