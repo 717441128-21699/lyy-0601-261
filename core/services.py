@@ -580,14 +580,26 @@ class ApprovalService:
         sql = '''SELECT batch_no, applicant, apply_date, 
                         COALESCE(SUM(amount), 0) as total_amount,
                         COUNT(*) as invoice_count,
-                        status, approver, approval_date, approval_opinion
+                        MIN(status) as status,
+                        MAX(approver) as approver,
+                        MAX(approval_date) as approval_date,
+                        MAX(approval_opinion) as approval_opinion
                  FROM approval_lists 
-                 WHERE batch_no IS NOT NULL AND batch_no != ?'''
+                 WHERE batch_no IS NOT NULL AND batch_no != ?
+                 GROUP BY batch_no ORDER BY MAX(created_at) DESC'''
         params = ['']
         if status:
-            sql += ' AND status = ?'
-            params.append(status)
-        sql += ' GROUP BY batch_no ORDER BY MAX(created_at) DESC'
+            sql = '''SELECT batch_no, applicant, apply_date, 
+                            COALESCE(SUM(amount), 0) as total_amount,
+                            COUNT(*) as invoice_count,
+                            MIN(status) as status,
+                            MAX(approver) as approver,
+                            MAX(approval_date) as approval_date,
+                            MAX(approval_opinion) as approval_opinion
+                     FROM approval_lists 
+                     WHERE batch_no IS NOT NULL AND batch_no != ? AND status = ?
+                     GROUP BY batch_no ORDER BY MAX(created_at) DESC'''
+            params = ['', status]
         rows = db.query(sql, tuple(params))
         return [ApprovalBatch(
             batch_no=r['batch_no'] or '',
@@ -650,6 +662,8 @@ class ApprovalService:
                 inv = InvoiceService.get_by_id(inv_id)
                 if not inv:
                     continue
+                if inv.status not in ('pending', 'reviewing'):
+                    continue
                 amount = inv.reimbursable_amount if inv.reimbursable_amount > 0 else inv.total_amount
                 db.insert_raw('approval_lists', {
                     'invoice_id': inv_id,
@@ -662,6 +676,9 @@ class ApprovalService:
                 db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('reviewing', inv_id))
                 total_amount += amount
                 count += 1
+            if count == 0:
+                db.rollback()
+                return '', 0, 0.0
             db.commit()
         except Exception:
             db.rollback()
@@ -710,43 +727,53 @@ class ApprovalService:
     def approve_batch(batch_no: str, approver: str = '', opinion: str = '') -> int:
         db = get_db()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        rows = db.update('approval_lists', {
-            'status': 'approved',
-            'approver': approver,
-            'approval_date': now,
-            'approval_opinion': opinion
-        }, 'batch_no = ?', (batch_no,))
         
-        if rows > 0:
-            items = db.query('SELECT invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        items = db.query('SELECT id, invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        if not items:
+            return 0
+        
+        db.begin_transaction()
+        try:
             for item in items:
+                db.execute('UPDATE approval_lists SET status = ?, approver = ?, approval_date = ?, approval_opinion = ? WHERE id = ?',
+                          ('approved', approver, now, opinion, item['id']))
                 if item['invoice_id']:
                     db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('approved', item['invoice_id']))
             db.commit()
-            InvoiceService._safe_log(db, 'approve_batch', 'approval', 0, 
-                                      f'批次[{batch_no}] 审批通过: {rows}张票据')
-        return rows
+        except Exception:
+            db.rollback()
+            raise
+        
+        count = len(items)
+        InvoiceService._safe_log(db, 'approve_batch', 'approval', 0, 
+                                  f'批次[{batch_no}] 审批通过: {count}张票据')
+        return count
 
     @staticmethod
     def reject_batch(batch_no: str, approver: str = '', opinion: str = '') -> int:
         db = get_db()
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        rows = db.update('approval_lists', {
-            'status': 'rejected',
-            'approver': approver,
-            'approval_date': now,
-            'approval_opinion': opinion
-        }, 'batch_no = ?', (batch_no,))
         
-        if rows > 0:
-            items = db.query('SELECT invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        items = db.query('SELECT id, invoice_id FROM approval_lists WHERE batch_no = ?', (batch_no,))
+        if not items:
+            return 0
+        
+        db.begin_transaction()
+        try:
             for item in items:
+                db.execute('UPDATE approval_lists SET status = ?, approver = ?, approval_date = ?, approval_opinion = ? WHERE id = ?',
+                          ('rejected', approver, now, opinion, item['id']))
                 if item['invoice_id']:
                     db.execute('UPDATE invoices SET status = ? WHERE id = ?', ('rejected', item['invoice_id']))
             db.commit()
-            InvoiceService._safe_log(db, 'reject_batch', 'approval', 0, 
-                                      f'批次[{batch_no}] 审批驳回: {rows}张票据')
-        return rows
+        except Exception:
+            db.rollback()
+            raise
+        
+        count = len(items)
+        InvoiceService._safe_log(db, 'reject_batch', 'approval', 0, 
+                                  f'批次[{batch_no}] 审批驳回: {count}张票据')
+        return count
 
 
 class StatisticsService:
@@ -925,6 +952,21 @@ class OperationLogService:
     def get_all(limit: int = 200) -> List[OperationLog]:
         db = get_db()
         rows = db.query('SELECT * FROM operation_logs ORDER BY id DESC LIMIT ?', (limit,))
+        return [OperationLog(
+            id=r['id'], operation_type=r['operation_type'] or '',
+            target_type=r['target_type'] or '', target_id=r['target_id'],
+            detail=r['detail'] or '', operator=r['operator'] or '',
+            created_at=r['created_at'] or ''
+        ) for r in rows]
+
+    @staticmethod
+    def search(keyword: str, limit: int = 500) -> List[OperationLog]:
+        db = get_db()
+        pattern = f'%{keyword}%'
+        rows = db.query(
+            'SELECT * FROM operation_logs WHERE detail LIKE ? OR operation_type LIKE ? OR target_type LIKE ? ORDER BY id DESC LIMIT ?',
+            (pattern, pattern, pattern, limit)
+        )
         return [OperationLog(
             id=r['id'], operation_type=r['operation_type'] or '',
             target_type=r['target_type'] or '', target_id=r['target_id'],

@@ -148,9 +148,17 @@ class SettingsWindow(QWidget):
         tab_layout = QVBoxLayout(tab)
         
         bar = QHBoxLayout()
-        desc = QLabel('📜 操作日志（最近200条）')
+        desc = QLabel('📜 操作日志')
         desc.setStyleSheet('font-weight: bold; color: #2c3e50; font-size: 14px;')
         bar.addWidget(desc)
+        
+        bar.addWidget(QLabel('搜索:'))
+        self.log_search_input = QLineEdit()
+        self.log_search_input.setPlaceholderText('输入批次号/关键词搜索')
+        self.log_search_input.setFixedWidth(250)
+        self.log_search_input.textChanged.connect(self._refresh_logs)
+        bar.addWidget(self.log_search_input)
+        
         bar.addStretch()
         
         self.btn_refresh_log = QPushButton('🔄 刷新日志')
@@ -161,9 +169,6 @@ class SettingsWindow(QWidget):
         tab_layout.addLayout(bar)
         
         self.logs_table = QTableWidget(0, 6)
-        self.logs_table.setHorizontalHeaderLabels([
-            'ID', '操作时间', '操作类型', '操作对象', '对象ID', '详情',
-        ])
         self.logs_table.setHorizontalHeaderLabels([
             'ID', '操作时间', '操作类型', '操作对象', '对象ID', '详情'
         ])
@@ -212,7 +217,11 @@ class SettingsWindow(QWidget):
             self.rules_table.setItem(row, 6, item)
 
     def _refresh_logs(self):
-        logs = OperationLogService.get_all(limit=200)
+        keyword = self.log_search_input.text().strip() if hasattr(self, 'log_search_input') else ''
+        if keyword:
+            logs = OperationLogService.search(keyword=keyword, limit=500)
+        else:
+            logs = OperationLogService.get_all(limit=200)
         self.logs_table.setRowCount(len(logs))
         for row, log in enumerate(logs):
             self.logs_table.setItem(row, 0, QTableWidgetItem(str(log.id)))
@@ -220,7 +229,11 @@ class SettingsWindow(QWidget):
             self.logs_table.setItem(row, 2, QTableWidgetItem(log.operation_type))
             self.logs_table.setItem(row, 3, QTableWidgetItem(log.target_type))
             self.logs_table.setItem(row, 4, QTableWidgetItem(str(log.target_id) if log.target_id else '-'))
-            self.logs_table.setItem(row, 5, QTableWidgetItem(log.detail))
+            
+            detail_item = QTableWidgetItem(log.detail)
+            if keyword and keyword.upper() in log.detail.upper():
+                detail_item.setBackground(Qt.GlobalColor.yellow)
+            self.logs_table.setItem(row, 5, detail_item)
 
     def _on_select_rule(self):
         items = self.rules_table.selectedItems()

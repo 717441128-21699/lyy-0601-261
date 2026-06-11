@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from core.services import (
-    InvoiceService, CategoryService, DepartmentService, ProjectService, RuleService
+    InvoiceService, CategoryService, DepartmentService, ProjectService,
+    RuleService, ApprovalService
 )
 from core.models import Invoice, STATUS_MAP
 
@@ -265,32 +266,37 @@ class CategoryWindow(QWidget):
                 item.setCheckState(Qt.CheckState.Unchecked)
         self._get_selected_ids()
 
+    def _select_project_by_name(self, name: str):
+        for i in range(self.project_combo.count()):
+            if self.project_combo.itemText(i) == name:
+                self.project_combo.setCurrentIndex(i)
+                return True
+        return False
+
     def _add_project(self):
         name, ok = QInputDialog.getText(self, '新建项目', '请输入项目名称:')
-        if ok and name.strip():
-            from core.models import Project
-            proj_name = name.strip()
-            existing = ProjectService.get_by_name(proj_name)
-            if existing:
-                self._load_combos()
-                for i in range(self.project_combo.count()):
-                    if self.project_combo.itemText(i) == proj_name:
-                        self.project_combo.setCurrentIndex(i)
-                        break
-                QMessageBox.information(self, '提示', f'项目"{proj_name}"已存在，已直接选中。')
-                return
-            
-            proj = Project(name=proj_name)
-            new_id = ProjectService.create(proj)
-            if new_id:
-                self._load_combos()
-                for i in range(self.project_combo.count()):
-                    if self.project_combo.itemText(i) == proj_name:
-                        self.project_combo.setCurrentIndex(i)
-                        break
-                QMessageBox.information(self, '成功', f'项目"{proj_name}"已创建并保存。')
-            else:
-                QMessageBox.warning(self, '失败', '项目创建失败。')
+        if not ok or not name.strip():
+            return
+        
+        from core.models import Project
+        proj_name = name.strip()
+        existing = ProjectService.get_by_name(proj_name)
+        if existing:
+            self._load_combos()
+            self._select_project_by_name(proj_name)
+            QMessageBox.information(self, '提示', f'项目"{proj_name}"已存在，已直接选中。')
+            return
+        
+        proj = Project(name=proj_name)
+        new_id = ProjectService.create(proj)
+        if new_id:
+            self._load_combos()
+            self._select_project_by_name(proj_name)
+            QMessageBox.information(self, '成功', f'项目"{proj_name}"已创建并保存。')
+        else:
+            self._load_combos()
+            self._select_project_by_name(proj_name)
+            QMessageBox.information(self, '提示', f'项目"{proj_name}"已存在，已直接选中。')
 
     def _calc_reimbursable(self):
         ids = self._get_selected_ids()

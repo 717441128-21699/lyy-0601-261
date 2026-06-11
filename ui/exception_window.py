@@ -243,12 +243,12 @@ class ExceptionWindow(QWidget):
         dup_count = sum(1 for inv in dup_invoices if inv.is_duplicate)
         missing_count = sum(1 for inv in dup_invoices if not inv.has_attachment)
         unmatched_payments = PaymentService.get_all(matched_status='unmatched')
-        pending_approvals = ApprovalService.get_all(status='pending')
+        pending_batches = ApprovalService.get_batches(status='pending')
         
         self.lbl_dup_count.setText(f'🔁 重复票据: {dup_count}')
         self.lbl_missing_count.setText(f'📎 缺少附件: {missing_count}')
         self.lbl_unmatched_count.setText(f'🔗 未匹配流水: {len(unmatched_payments)}')
-        self.lbl_pending_count.setText(f'📋 待审批: {len(pending_approvals)}')
+        self.lbl_pending_count.setText(f'📋 待审批: {len(pending_batches)} 批')
 
     def _on_tab_changed(self, index):
         self.refresh()

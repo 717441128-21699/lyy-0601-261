@@ -238,12 +238,17 @@ class ImportWindow(QWidget):
                 
                 detail = f'导入成功！\n\n批次号: {result.batch_no}\n- 新增票据: {result.invoice_count} 张\n- 新增流水: {result.payment_count} 条'
                 if self._last_skipped:
-                    detail += f'\n- 跳过数据: {len(self._last_skipped)} 项'
-                detail += '\n\n可在"规则设置 → 操作记录"中按批次号查询。'
+                    detail += f'\n\n跳过 {len(self._last_skipped)} 项：'
+                    for s in self._last_skipped[:15]:
+                        detail += f'\n  • {s}'
+                    if len(self._last_skipped) > 15:
+                        detail += f'\n  ... 共 {len(self._last_skipped)} 项'
+                detail += '\n\n可在"规则设置 → 操作记录"中搜索批次号查询。'
                 detail += '\n请前往"票据识别核对"继续处理。'
                 
                 self.progress_bar.setVisible(False)
                 QMessageBox.information(self, '导入完成', detail)
+                self._last_skipped.clear()
             else:
                 self.progress_bar.setVisible(False)
                 detail = f'导入失败，数据已全部回滚（未写入数据库）。\n\n错误原因: {result.error_msg}'
